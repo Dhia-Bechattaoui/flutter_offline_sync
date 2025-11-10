@@ -53,7 +53,7 @@ coverage/
 test/.test_coverage.dart
 
 # Generated files
-*.g.dart
+# Note: *.g.dart files are committed for pub.dev packages so pana can analyze them
 *.freezed.dart
 *.mocks.dart
 
