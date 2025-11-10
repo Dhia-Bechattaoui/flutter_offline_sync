@@ -134,12 +134,51 @@ class SyncEngine {
   }
 
   /// Handles connectivity changes.
-  void _onConnectivityChanged(bool isOnline) {
-    _updateStatus(isOnline: isOnline);
+  void _onConnectivityChanged(bool isOnline) async {
+    // Capture the previous state BEFORE updating
+    final wasOffline = !_currentStatus.isOnline;
 
-    if (isOnline && _currentStatus.autoSyncEnabled) {
-      // Trigger sync when coming back online
-      syncAll();
+    // Verify actual connectivity status
+    final actualOnline = _networkManager.isOnline;
+
+    // Update status with actual connectivity
+    await _updateStatus(isOnline: actualOnline);
+
+    // If we transitioned from offline to online and auto-sync is enabled
+    if (actualOnline && wasOffline) {
+      _logger.info(
+        'Connectivity changed: offline -> online (actual: $actualOnline)',
+      );
+
+      // Check auto-sync setting
+      if (_currentStatus.autoSyncEnabled) {
+        // Wait a brief moment to ensure status is fully updated
+        await Future.delayed(const Duration(milliseconds: 500));
+
+        // Verify we're still online and auto-sync is still enabled
+        final stillOnline = _networkManager.isOnline;
+        if (stillOnline && _currentStatus.autoSyncEnabled) {
+          final pendingCount = await _calculatePendingCount();
+          if (pendingCount > 0) {
+            _logger.info(
+              'Back online with $pendingCount pending items. Auto-syncing...',
+            );
+            syncAll();
+          } else {
+            _logger.debug('Back online but no pending items to sync');
+          }
+        } else {
+          _logger.debug(
+            'Status changed during wait: online=$stillOnline, autoSync=${_currentStatus.autoSyncEnabled}',
+          );
+        }
+      } else {
+        _logger.debug('Back online but auto-sync is disabled');
+      }
+    } else if (!actualOnline && wasOffline) {
+      _logger.debug('Still offline');
+    } else if (actualOnline && !wasOffline) {
+      _logger.debug('Already online');
     }
   }
 
@@ -179,10 +218,16 @@ class SyncEngine {
       return;
     }
 
-    if (!_currentStatus.isOnline) {
+    // Check actual network connectivity, not just cached status
+    final isOnline = _networkManager.isOnline;
+    if (!isOnline) {
       _logger.warning('Cannot sync: device is offline');
+      await _updateStatus(isOnline: false);
       return;
     }
+
+    // Update status to reflect we're online
+    await _updateStatus(isOnline: true);
 
     _logger.info('Starting full sync');
     await _updateStatus(isSyncing: true, syncProgress: 0.0);

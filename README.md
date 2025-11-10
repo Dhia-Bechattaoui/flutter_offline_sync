@@ -7,6 +7,8 @@
 
 A comprehensive Flutter package for offline functionality with automatic sync capabilities across all platforms.
 
+<img src="assets/example.gif" width="300" alt="Example demonstration">
+
 ## Features
 
 - 🚀 **Cross-Platform Support**: iOS, Android, Web, Windows, macOS, Linux, and WASM

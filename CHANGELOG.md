@@ -19,6 +19,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Cross-platform connectivity monitoring via `connectivity_plus` and `internet_connection_checker_plus`.
 - Persistent sync queue and conflict store to retry failed operations and surface manual resolutions.
 - Complete Android example scaffold (Gradle, manifests, resources) to exercise the package end-to-end.
+- Sync status indicators for individual entities (synced, pending, queued, error, conflict).
+- Online/offline mode toggle switch in example app.
+- Manual sync button with pending count display.
+- Example GIF demonstration in README.
+
+### Fixed
+- Auto-sync now properly triggers when going from offline to online.
+- Connectivity change handler now uses actual network status instead of cached values.
+- Sync engine now checks real-time connectivity before syncing.
+- Improved state tracking for offline-to-online transitions.
 
 ### Changed
 - Raised minimum Flutter SDK requirement to `>=3.32.0`.
@@ -27,6 +37,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reformatted `platform_connectivity_impl.dart` to satisfy analyzer tooling.
 - Achieved perfect pana score (160/160) through metadata and formatting updates.
 - Refactored `OfflineDatabase`, `SyncEngine`, and `OfflineSyncManager` to use the shared storage codec, batch operations, and richer sync status tracking.
+- Example app now shows sync status for each todo item with visual indicators.
+- Manual sync button is always visible when online (not just when pending items exist).
+- Improved sync status card UI with better visual feedback.
+- Enhanced connectivity change detection with better logging.
 
 ## [0.0.1] - 2024-12-19
 
