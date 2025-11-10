@@ -1,25 +1,29 @@
 name: flutter_offline_sync
 description: A comprehensive Flutter package for offline functionality with automatic sync capabilities across all platforms.
-version: 0.0.1
+version: 0.1.0
 homepage: https://pub.dev/packages/flutter_offline_sync
-repository: https://github.com/your-username/flutter_offline_sync
-issue_tracker: https://github.com/your-username/flutter_offline_sync/issues
-documentation: https://pub.dev/packages/flutter_offline_sync
+documentation: https://pub.dev/documentation/flutter_offline_sync/latest/
 
 environment:
   sdk: '>=3.8.0 <4.0.0'
-  flutter: ">=3.24.0"
+  flutter: ">=3.32.0"
 
 dependencies:
   flutter:
     sdk: flutter
   path: ^1.0.0
   dio: ^5.0.0
+  connectivity_plus: ^7.0.0
   shared_preferences: ^2.0.0
   uuid: ^4.0.0
   json_annotation: ^4.9.0
   equatable: ^2.0.0
   rxdart: ^0.28.0
+  sqflite: ^2.0.0
+  sqflite_common_ffi: ^2.0.0
+  sqflite_common_ffi_web: ^1.0.0
+  path_provider: ^2.0.0
+  internet_connection_checker_plus: ^2.0.0
 
 dev_dependencies:
   flutter_test:
@@ -40,6 +44,9 @@ topics:
   - database
   - flutter
   - cross-platform
+
+funding:
+  - https://github.com/sponsors/Dhia-Bechattaoui
 
 platforms:
   android:
