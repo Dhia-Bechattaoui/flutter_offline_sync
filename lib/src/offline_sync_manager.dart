@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'database/entity_codec.dart';
 import 'database/offline_database.dart';
 import 'network/network_manager.dart';
 import 'sync/sync_engine.dart';
@@ -22,7 +23,6 @@ class OfflineSyncManager {
 
   bool _isInitialized = false;
   StreamController<SyncStatus>? _statusController;
-  final List<SyncEntity Function(Map<String, dynamic>)> _entityFactories = [];
 
   OfflineSyncManager._();
 
@@ -81,6 +81,7 @@ class OfflineSyncManager {
         _syncEngine.setAutoSyncInterval(autoSyncInterval);
       }
       _syncEngine.setMaxRetries(maxRetries);
+      _syncEngine.setBatchSize(batchSize);
       _syncEngine.setAutoSyncEnabled(autoSyncEnabled);
 
       // Initialize status controller
@@ -105,7 +106,6 @@ class OfflineSyncManager {
     String endpoint,
     T Function(Map<String, dynamic>) fromJson,
   ) {
-    _entityFactories.add(fromJson);
     _syncEngine.registerEntity<T>(tableName, endpoint, fromJson);
     _logger.info('Registered entity: $tableName');
   }
@@ -129,14 +129,14 @@ class OfflineSyncManager {
 
     try {
       final now = DateTime.now();
-      final savedEntity = entity.copyWith(
-        updatedAt: now,
-        syncedAt:
-            entity.syncedAt ??
-            (entity.createdAt == entity.updatedAt ? now : null),
+      final savedEntity = entity.copyWith(updatedAt: now, syncedAt: null);
+
+      final storageMap = EntityCodec.serializeForStorage(
+        savedEntity,
+        syncStatus: 'pending',
       );
 
-      await _database.insert(entity.tableName, savedEntity.toJson());
+      await _database.insert(entity.tableName, storageMap);
       _logger.debug('Saved entity: ${entity.id}');
 
       return savedEntity as T;
@@ -154,11 +154,20 @@ class OfflineSyncManager {
     _ensureInitialized();
 
     try {
-      final updatedEntity = entity.copyWith(updatedAt: DateTime.now());
+      final updatedEntity = entity.copyWith(
+        updatedAt: DateTime.now(),
+        syncedAt: null,
+      );
+
+      final storageMap = EntityCodec.serializeForStorage(
+        updatedEntity,
+        syncStatus: 'pending',
+      );
+      storageMap.remove('id');
 
       await _database.update(
         entity.tableName,
-        updatedEntity.toJson(),
+        storageMap,
         where: 'id = ?',
         whereArgs: [entity.id],
       );
@@ -209,13 +218,13 @@ class OfflineSyncManager {
       final result = await _database.findById(tableName, id);
       if (result == null) return null;
 
-      // Find the appropriate factory for this entity type
-      final factory = _entityFactories.firstWhere(
-        (factory) => factory(result).runtimeType.toString() == T.toString(),
-        orElse: () => throw StateError('No factory found for type $T'),
-      );
-
-      return factory(result) as T;
+      final entity = EntityCodec.materialize(_database, tableName, result);
+      if (entity is! T) {
+        throw StateError(
+          'Entity type mismatch. Expected $T but found ${entity.runtimeType}',
+        );
+      }
+      return entity;
     } catch (e, stackTrace) {
       _logger.error('Failed to find entity: $id', e, stackTrace);
       rethrow;
@@ -244,14 +253,45 @@ class OfflineSyncManager {
     try {
       final results = await _database.findAll(tableName);
 
-      // Convert to entities
-      final factory = _entityFactories.firstWhere(
-        (factory) =>
-            factory(results.first).runtimeType.toString() == T.toString(),
-        orElse: () => throw StateError('No factory found for type $T'),
-      );
+      Iterable<Map<String, dynamic>> filtered = includeDeleted
+          ? results
+          : results.where((row) => (row['is_deleted'] ?? 0) == 0);
 
-      return results.map((row) => factory(row) as T).toList();
+      if (orderBy != null) {
+        final sorted = filtered.toList()
+          ..sort((a, b) {
+            final aValue = a[orderBy];
+            final bValue = b[orderBy];
+            if (aValue is Comparable && bValue is Comparable) {
+              return ascending
+                  ? aValue.compareTo(bValue)
+                  : bValue.compareTo(aValue);
+            }
+            return 0;
+          });
+        filtered = sorted;
+      }
+
+      if (offset != null && offset > 0) {
+        filtered = filtered.skip(offset);
+      }
+
+      if (limit != null && limit > 0) {
+        filtered = filtered.take(limit);
+      }
+
+      final entities = <T>[];
+      for (final row in filtered) {
+        final entity = EntityCodec.materialize(_database, tableName, row);
+        if (entity is! T) {
+          throw StateError(
+            'Entity type mismatch. Expected $T but found ${entity.runtimeType}',
+          );
+        }
+        entities.add(entity);
+      }
+
+      return entities;
     } catch (e, stackTrace) {
       _logger.error(
         'Failed to find all entities in table: $tableName',
@@ -271,7 +311,10 @@ class OfflineSyncManager {
     _ensureInitialized();
 
     try {
-      return await _database.count(tableName);
+      return await _database.count(
+        tableName,
+        where: includeDeleted ? null : 'is_deleted = 0',
+      );
     } catch (e, stackTrace) {
       _logger.error(
         'Failed to count entities in table: $tableName',
