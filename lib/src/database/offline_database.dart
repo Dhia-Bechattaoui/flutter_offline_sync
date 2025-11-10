@@ -3,22 +3,24 @@ import 'dart:async';
 import '../models/sync_entity.dart';
 import '../utils/logger.dart';
 import 'platform_database.dart';
+import 'sqlite_platform_database.dart';
 
 /// Manages the local database for offline storage.
 class OfflineDatabase {
   PlatformDatabase? _database;
-  final Map<String, String> _tableDefinitions = {};
-  final List<SyncEntity Function(Map<String, dynamic>)> _entityFactories = [];
+  final Map<String, _EntityRegistration> _registrations = {};
   final Logger _logger = Logger('OfflineDatabase');
+  bool _isInitialized = false;
 
   /// Initializes the database and creates necessary tables.
   Future<void> initialize() async {
     try {
-      // Use platform-agnostic in-memory database for all platforms
-      _database = InMemoryDatabase();
+      // Use persistent SQLite database across all supported platforms
+      _database = SqlitePlatformDatabase();
       await _database!.initialize();
       await _onCreate();
-      _logger.info('Database initialized with in-memory implementation');
+      _logger.info('Database initialized with SQLite implementation');
+      _isInitialized = true;
     } catch (e, stackTrace) {
       _logger.error('Failed to initialize database', e, stackTrace);
       rethrow;
@@ -30,6 +32,7 @@ class OfflineDatabase {
     if (_database != null) {
       await _database!.close();
       _database = null;
+      _isInitialized = false;
       _logger.info('Database closed');
     }
   }
@@ -40,7 +43,7 @@ class OfflineDatabase {
 
     // Create sync metadata table
     await _database!.createTable('sync_metadata', '''
-      CREATE TABLE sync_metadata (
+      CREATE TABLE IF NOT EXISTS sync_metadata (
         id TEXT PRIMARY KEY,
         last_sync_at INTEGER,
         sync_status TEXT,
@@ -53,7 +56,7 @@ class OfflineDatabase {
 
     // Create sync conflicts table
     await _database!.createTable('sync_conflicts', '''
-      CREATE TABLE sync_conflicts (
+      CREATE TABLE IF NOT EXISTS sync_conflicts (
         id TEXT PRIMARY KEY,
         entity_id TEXT NOT NULL,
         entity_type TEXT NOT NULL,
@@ -69,9 +72,26 @@ class OfflineDatabase {
       )
     ''');
 
+    await _database!.createTable('sync_queue', '''
+      CREATE TABLE IF NOT EXISTS sync_queue (
+        id TEXT PRIMARY KEY,
+        entity_id TEXT NOT NULL,
+        table_name TEXT NOT NULL,
+        endpoint TEXT NOT NULL,
+        operation TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        retry_count INTEGER DEFAULT 0,
+        max_retries INTEGER DEFAULT 3,
+        next_retry_at INTEGER,
+        last_error TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      )
+    ''');
+
     // Create registered entity tables
-    for (final entry in _tableDefinitions.entries) {
-      await _database!.createTable(entry.key, entry.value);
+    for (final entry in _registrations.entries) {
+      await _database!.createTable(entry.key, entry.value.createTableSql);
       _logger.info('Created table: ${entry.key}');
     }
   }
@@ -82,9 +102,28 @@ class OfflineDatabase {
     String createTableSql,
     T Function(Map<String, dynamic>) fromJson,
   ) {
-    _tableDefinitions[tableName] = createTableSql;
-    _entityFactories.add(fromJson);
+    _registrations[tableName] = _EntityRegistration(
+      tableName: tableName,
+      createTableSql: createTableSql,
+      fromJson: fromJson,
+      entityType: T,
+    );
     _logger.info('Registered entity: $tableName');
+
+    if (_isInitialized && _database != null) {
+      unawaited(
+        _database!.createTable(tableName, createTableSql).catchError((
+          error,
+          stackTrace,
+        ) {
+          _logger.error(
+            'Failed to create table after registration: $tableName',
+            error,
+            stackTrace,
+          );
+        }),
+      );
+    }
   }
 
   /// Creates a table for the given entity type.
@@ -99,13 +138,11 @@ class OfflineDatabase {
 
   /// Inserts an entity into the database.
   Future<int> insert(String table, Map<String, dynamic> values) async {
-    if (_database == null) {
-      throw StateError('Database not initialized');
-    }
+    _ensureInitialized();
 
     final now = DateTime.now().millisecondsSinceEpoch;
-    values['created_at'] = now;
-    values['updated_at'] = now;
+    values.putIfAbsent('created_at', () => now);
+    values.putIfAbsent('updated_at', () => now);
 
     final id = await _database!.insert(table, values);
     _logger.debug('Inserted into $table with id: $id');
@@ -119,11 +156,10 @@ class OfflineDatabase {
     String? where,
     List<dynamic>? whereArgs,
   }) async {
-    if (_database == null) {
-      throw StateError('Database not initialized');
-    }
+    _ensureInitialized();
 
-    values['updated_at'] = DateTime.now().millisecondsSinceEpoch;
+    values['updated_at'] =
+        values['updated_at'] ?? DateTime.now().millisecondsSinceEpoch;
 
     final rowsAffected = await _database!.update(
       table,
@@ -141,9 +177,7 @@ class OfflineDatabase {
     String? where,
     List<dynamic>? whereArgs,
   }) async {
-    if (_database == null) {
-      throw StateError('Database not initialized');
-    }
+    _ensureInitialized();
 
     final rowsAffected = await _database!.delete(
       table,
@@ -158,7 +192,12 @@ class OfflineDatabase {
   Future<int> softDelete(String table, String id) async {
     return await update(
       table,
-      {'deleted_at': DateTime.now().millisecondsSinceEpoch},
+      {
+        'deleted_at': DateTime.now().millisecondsSinceEpoch,
+        'is_deleted': 1,
+        'sync_status': 'pending',
+        'synced_at': null,
+      },
       where: 'id = ?',
       whereArgs: [id],
     );
@@ -166,9 +205,7 @@ class OfflineDatabase {
 
   /// Finds an entity by ID.
   Future<Map<String, dynamic>?> findById(String table, String id) async {
-    if (_database == null) {
-      throw StateError('Database not initialized');
-    }
+    _ensureInitialized();
 
     final results = await _database!.query(
       table,
@@ -181,18 +218,14 @@ class OfflineDatabase {
 
   /// Finds all entities in a table.
   Future<List<Map<String, dynamic>>> findAll(String table) async {
-    if (_database == null) {
-      throw StateError('Database not initialized');
-    }
+    _ensureInitialized();
 
     return await _database!.query(table);
   }
 
   /// Finds unsynced entities.
   Future<List<Map<String, dynamic>>> findUnsynced(String table) async {
-    if (_database == null) {
-      throw StateError('Database not initialized');
-    }
+    _ensureInitialized();
 
     return await _database!.query(
       table,
@@ -207,9 +240,7 @@ class OfflineDatabase {
     String? where,
     List<dynamic>? whereArgs,
   }) async {
-    if (_database == null) {
-      throw StateError('Database not initialized');
-    }
+    _ensureInitialized();
 
     final results = await _database!.query(
       table,
@@ -226,34 +257,75 @@ class OfflineDatabase {
     String sql, [
     List<dynamic>? arguments,
   ]) async {
-    if (_database == null) {
-      throw StateError('Database not initialized');
-    }
+    _ensureInitialized();
 
     return await _database!.rawQuery(sql, arguments);
   }
 
   /// Executes a raw SQL statement.
   Future<int> rawExecute(String sql, [List<dynamic>? arguments]) async {
-    if (_database == null) {
-      throw StateError('Database not initialized');
-    }
+    _ensureInitialized();
 
     return await _database!.rawExecute(sql, arguments);
   }
 
   /// Executes a database transaction.
   Future<T> transaction<T>(Future<T> Function(dynamic txn) action) async {
-    if (_database == null) {
-      throw StateError('Database not initialized');
-    }
+    _ensureInitialized();
 
     return await _database!.transaction(action);
   }
 
   /// Checks if the database is initialized.
-  bool get isInitialized => _database != null;
+  bool get isInitialized => _isInitialized;
 
   /// Gets the database instance.
   PlatformDatabase? get database => _database;
+
+  /// Returns true if an entity registration exists for the given table.
+  bool hasRegistration(String tableName) =>
+      _registrations.containsKey(tableName);
+
+  /// Creates an entity instance from persisted data.
+  SyncEntity createEntity(String tableName, Map<String, dynamic> data) {
+    final registration = _registrations[tableName];
+    if (registration == null) {
+      throw StateError('No entity registered for table: $tableName');
+    }
+    return registration.fromJson(data);
+  }
+
+  /// Gets the entity factory for a table if it exists.
+  SyncEntity Function(Map<String, dynamic>)? getFactory(String tableName) {
+    return _registrations[tableName]?.fromJson;
+  }
+
+  /// Gets all registered table names.
+  Iterable<String> get registeredTables => _registrations.keys;
+
+  /// Gets the entity type registered for a table.
+  Type? entityTypeForTable(String tableName) =>
+      _registrations[tableName]?.entityType;
+
+  void _ensureInitialized() {
+    if (!_isInitialized || _database == null) {
+      throw StateError(
+        'OfflineDatabase not initialized. Call initialize() first.',
+      );
+    }
+  }
+}
+
+class _EntityRegistration {
+  final String tableName;
+  final String createTableSql;
+  final SyncEntity Function(Map<String, dynamic>) fromJson;
+  final Type entityType;
+
+  const _EntityRegistration({
+    required this.tableName,
+    required this.createTableSql,
+    required this.fromJson,
+    required this.entityType,
+  });
 }
