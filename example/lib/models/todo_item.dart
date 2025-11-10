@@ -52,15 +52,18 @@ class TodoItem extends SyncEntity {
 
   @override
   Map<String, dynamic> toJson() {
+    int? dateToTimestamp(DateTime? value) =>
+        value?.millisecondsSinceEpoch;
+
     return {
       'id': id,
       'title': title,
       'description': description,
       'completed': isCompleted,
       'userId': userId,
-      'created_at': createdAt.toIso8601String(),
-      'updated_at': updatedAt.toIso8601String(),
-      'synced_at': syncedAt?.toIso8601String(),
+      'created_at': dateToTimestamp(createdAt),
+      'updated_at': dateToTimestamp(updatedAt),
+      'synced_at': dateToTimestamp(syncedAt),
       'is_deleted': isDeleted,
       'version': version,
       'metadata': metadata,
@@ -68,21 +71,37 @@ class TodoItem extends SyncEntity {
   }
 
   factory TodoItem.fromJson(Map<String, dynamic> json) {
+    DateTime parseDate(dynamic value) {
+      if (value == null) return DateTime.now();
+      if (value is int) {
+        return DateTime.fromMillisecondsSinceEpoch(value);
+      }
+      if (value is String) {
+        return DateTime.tryParse(value) ?? DateTime.now();
+      }
+      return DateTime.now();
+    }
+
+    DateTime? parseNullableDate(dynamic value) {
+      if (value == null) return null;
+      if (value is int) {
+        return DateTime.fromMillisecondsSinceEpoch(value);
+      }
+      if (value is String) {
+        return DateTime.tryParse(value);
+      }
+      return null;
+    }
+
     return TodoItem(
       id: json['id']?.toString() ?? '',
       title: json['title'] ?? '',
       description: json['description'] ?? '',
       isCompleted: json['completed'] ?? false,
       userId: json['userId'] ?? 0,
-      createdAt: json['created_at'] != null
-          ? DateTime.parse(json['created_at'])
-          : DateTime.now(),
-      updatedAt: json['updated_at'] != null
-          ? DateTime.parse(json['updated_at'])
-          : DateTime.now(),
-      syncedAt: json['synced_at'] != null
-          ? DateTime.parse(json['synced_at'])
-          : null,
+      createdAt: parseDate(json['created_at']),
+      updatedAt: parseDate(json['updated_at']),
+      syncedAt: parseNullableDate(json['synced_at']),
       isDeleted: json['is_deleted'] ?? false,
       version: json['version'] ?? 1,
       metadata: json['metadata'],
